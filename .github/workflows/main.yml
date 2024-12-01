@@ -1,4 +1,4 @@
-name: Build Docker Image
+name: Build Docker Image from External Repo
 
 on:
   schedule:
@@ -8,54 +8,56 @@ jobs:
   build-push:
     name: Buid and push Docker image to GitHub Container registry
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
 
+      - name: Get tdlib ref
+        uses: octokit/request-action@v2.x
+        id: get-tdlib-ref
+        with:
+          route: GET /repos/tdlib/td/branches/master
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Cache tdlib
+        id: cache-tdlib
+        uses: actions/cache@v4
+        with:
+          path: tdlib
+          key: tdlib-${{fromJson(steps.get-tdlib-ref.outputs.data).commit.sha}}
+
+      - name: Checkout tdlib
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{fromJson(steps.get-tdlib-ref.outputs.data).commit.sha}}
+          repository: tdlib/td
+          token: ${{secrets.GITHUB_TOKEN}}
+          path: tdlib
+
       - name: Login to GitHub Container registry
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Clone repository
+      - name: Set env vars
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
         run: |
-          git clone https://github.com/tdlib/td.git
-          cd td
-          LATEST_COMMIT=$(git rev-parse HEAD)
-          LATEST_COMMIT_SHORT=$(git rev-parse --short=7 HEAD)
+          LATEST_COMMIT=${{fromJson(steps.get-tdlib-ref.outputs.data).commit.sha}}
+          LATEST_COMMIT_SHORT=${LATEST_COMMIT:0:7}
           echo "LATEST_COMMIT=$LATEST_COMMIT" >> $GITHUB_ENV
           echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> $GITHUB_ENV
 
-      - name: Create LAST_PROCESSED_COMMIT variable
-        run: |
-          gh api \
-            --method POST \
-            /repos/${{ github.repository }}/actions/variables \
-            -f "name=LAST_PROCESSED_COMMIT" -f "value=none" || true
-
-      - name: Fetch LAST_PROCESSED_COMMIT variable
-        run: |
-          echo "Fetching last processed commit from repository variables..."
-          value=$(gh api \
-            /repos/${{ github.repository }}/actions/variables/LAST_PROCESSED_COMMIT \
-            --jq='.value' )
-          echo "LAST_PROCESSED_COMMIT=$value" >> $GITHUB_ENV
-
       - name: Build Docker image
-        if: env.LAST_PROCESSED_COMMIT != env.LATEST_COMMIT
+        if: steps.cache-tdlib.outputs.cache-hit != 'true'
         run: |
           tag=ghcr.io/${{ github.repository }}:${{ env.LATEST_COMMIT_SHORT }}-alpine
           docker build --network host --build-arg TD_COMMIT=${{ env.LATEST_COMMIT }} --tag $tag .
           docker push $tag
-
-      - name: Update LAST_PROCESSED_COMMIT variable
-        if: env.LAST_PROCESSED_COMMIT != env.LATEST_COMMIT
-        run: |
-          gh api \
-            --method PATCH \
-            /repos/${{ github.repository }}/actions/variables/LAST_PROCESSED_COMMIT \
-            -f "value=${{ env.LATEST_COMMIT }}"
