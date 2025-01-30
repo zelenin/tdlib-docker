@@ -1,6 +1,7 @@
 name: Build Docker Image from External Repo
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
 
