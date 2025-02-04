@@ -1,16 +1,18 @@
 name: Build Docker Image from External Repo
 
 on:
+  workflow_dispatch:
+  push:
   schedule:
     - cron: "0 0 * * *"
 
 jobs:
-  build-push:
-    name: Buid and push Docker image to GitHub Container registry
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      latest_commit: ${{ steps.setup-vars.outputs.LATEST_COMMIT }}
+      latest_commit_short: ${{ steps.setup-vars.outputs.LATEST_COMMIT_SHORT }}
+      cache_hit: ${{ steps.cache-tdlib.outputs.cache-hit }}
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
@@ -39,25 +41,93 @@ jobs:
           token: ${{secrets.GITHUB_TOKEN}}
           path: tdlib
 
+      - name: Setup variables
+        id: setup-vars
+        if: steps.cache-tdlib.outputs.cache-hit != 'true' || github.event_name!='schedule'
+        run: |
+          LATEST_COMMIT=${{fromJson(steps.get-tdlib-ref.outputs.data).commit.sha}}
+          LATEST_COMMIT_SHORT=${LATEST_COMMIT:0:7}
+          echo "LATEST_COMMIT=$LATEST_COMMIT" >> $GITHUB_OUTPUT
+          echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> $GITHUB_OUTPUT
+          echo "## TDLib Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: [\`${{ fromJson(steps.get-tdlib-ref.outputs.data).commit.sha }}\`](https://github.com/tdlib/td/commit/${{ fromJson(steps.get-tdlib-ref.outputs.data).commit.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Short hash: \`${LATEST_COMMIT:0:7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Cache hit: \`${{ steps.cache-tdlib.outputs.cache-hit }}\`" >> $GITHUB_STEP_SUMMARY
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.cache_hit != 'true' || github.event_name!='schedule'
+    strategy:
+      matrix:
+        platform: [amd64, arm64]
+        include:
+          - platform: amd64
+            runs-on: [ubuntu-latest]
+          - platform: arm64
+            runs-on: [ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
       - name: Login to GitHub Container registry
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set env vars
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
-        run: |
-          LATEST_COMMIT=${{fromJson(steps.get-tdlib-ref.outputs.data).commit.sha}}
-          LATEST_COMMIT_SHORT=${LATEST_COMMIT:0:7}
-          echo "LATEST_COMMIT=$LATEST_COMMIT" >> $GITHUB_ENV
-          echo "LATEST_COMMIT_SHORT=$LATEST_COMMIT_SHORT" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
-        if: steps.cache-tdlib.outputs.cache-hit != 'true'
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.latest_commit_short }}-alpine-${{ matrix.platform }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          platforms: linux/${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          context: ${{ inputs.context }}
+          # Uncomment the following lines to enable build caching while ci debugging
+          # cache-from: |
+          #   type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }}
+          # cache-to: |
+          #   type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }},mode=max
+          build-args: |
+            TD_COMMIT=${{ needs.prepare.outputs.latest_commit }}
+
+  merge:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.cache_hit != 'true' || github.event_name!='schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Login to GitHub Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
         run: |
-          tag=ghcr.io/${{ github.repository }}:${{ env.LATEST_COMMIT_SHORT }}-alpine
-          docker build --network host --build-arg TD_COMMIT=${{ env.LATEST_COMMIT }} --tag $tag .
-          docker push $tag
+          docker buildx imagetools create -t ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine \
+            ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine-amd64 \
+            ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine-arm64
+
+      - name: Add image addresses to summary
+        run: |
+          echo "## Built Docker Images" >> $GITHUB_STEP_SUMMARY
+          echo "- Multi-arch image: \`ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine\`" >> $GITHUB_STEP_SUMMARY
+          echo "- AMD64 image: \`ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- ARM64 image: \`ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.latest_commit_short }}-alpine-arm64\`" >> $GITHUB_STEP_SUMMARY

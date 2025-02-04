@@ -16,13 +16,13 @@ RUN apk update && \
         linux-headers \
         openssl-dev \
         php \
-        zlib-dev && \
-    git clone "https://github.com/tdlib/td.git" /src && \
+        zlib-dev
+RUN git clone "https://github.com/tdlib/td.git" /src && \
     cd /src && \
     git checkout ${TD_COMMIT} && \
     rm -rf build && \
-    mkdir ./build && \
-    cd ./build && \
+    mkdir ./build
+RUN cd /src/build && \
     cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX:PATH=/usr/local \
