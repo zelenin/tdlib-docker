@@ -97,10 +97,11 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           context: ${{ inputs.context }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }}
-          cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }},mode=max
+          # Uncomment the following lines to enable build caching while ci debugging
+          # cache-from: |
+          #   type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }}
+          # cache-to: |
+          #   type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-alpine-${{ matrix.platform }},mode=max
           build-args: |
             TD_COMMIT=${{ needs.prepare.outputs.latest_commit }}
 
